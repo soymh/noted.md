@@ -21,6 +21,7 @@ pub struct ClaudeConfig {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct GeminiConfig {
     pub api_key: String,
+    pub model: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -65,3 +66,5 @@ impl Config {
         Ok(())
     }
 }
+
+

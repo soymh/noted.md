@@ -34,6 +34,10 @@ pub enum Commands {
         #[arg(short, long, help = "Add a custom prompt to pass to the LLM")]
         prompt: Option<String>,
 
+        /// Model to use for conversion
+        #[arg(long, help = "Model to use for conversion (e.g., gemini-pro-vision, claude-3-opus-20240229, llava)")]
+        model: Option<String>,
+
         /// Number of pages to process at once (max 30)
         #[arg(long, default_value = "1", help = "Number of pages to process at once (max 30)")]
         pages_per_batch: u32,
@@ -70,3 +74,4 @@ pub enum Commands {
         edit: bool,
     },
 }
+

@@ -349,6 +349,7 @@ async fn run() -> Result<(), NotedError> {
                 config.active_provider = Some("gemini".to_string());
                 config.gemini = Some(config::GeminiConfig {
                     api_key: key.to_string(),
+                    model: "gemini-2.5-flash".to_string(), // Default model
                 });
 
                 config.save()?;
@@ -358,14 +359,14 @@ async fn run() -> Result<(), NotedError> {
             if let Some(ref key) = set_claude_api_key {
                 let mut config = Config::load()?;
                 config.active_provider = Some("claude".to_string());
-                let model = Input::with_theme(&ColorfulTheme::default())
+                let model_input = Input::with_theme(&ColorfulTheme::default()) // Renamed to avoid shadowing
                     .with_prompt("Claude model")
                     .default("claude-3-opus-20240229".to_string())
                     .interact_text()?;
 
                 config.claude = Some(config::ClaudeConfig {
                     api_key: key.to_string(),
-                    model,
+                    model: model_input, // Use the renamed variable
                 });
 
                 config.save()?;
@@ -398,7 +399,11 @@ async fn run() -> Result<(), NotedError> {
                             .with_prompt("Enter your Gemini API key: ")
                             .interact()?;
                         config.active_provider = Some("gemini".to_string());
-                        config.gemini = Some(GeminiConfig { api_key });
+                        let model_input = Input::with_theme(&ColorfulTheme::default()) // Renamed to avoid shadowing
+                            .with_prompt("Gemini model")
+                            .default("gemini-2.5-flash".to_string())
+                            .interact_text()?;
+                        config.gemini = Some(GeminiConfig { api_key, model: model_input }); // Use the renamed variable
                         config.save()?;
                         println!("{}", "Config saved successfully.".green());
                     }
@@ -422,7 +427,7 @@ async fn run() -> Result<(), NotedError> {
                             .default(0)
                             .interact()?;
 
-                        let model = if selected_model == anthropic_models.len() - 1 {
+                        let model_input = if selected_model == anthropic_models.len() - 1 { // Renamed to avoid shadowing
                             Input::with_theme(&ColorfulTheme::default())
                                 .with_prompt("Enter the custom model name:")
                                 .interact_text()?
@@ -430,7 +435,7 @@ async fn run() -> Result<(), NotedError> {
                             anthropic_models[selected_model].trim().to_string()
                         };
 
-                        config.claude = Some(ClaudeConfig { api_key, model });
+                        config.claude = Some(ClaudeConfig { api_key, model: model_input }); // Use the renamed variable
                         config.save()?;
                         println!("{}", "Config saved successfully.".green());
                     }
@@ -440,14 +445,14 @@ async fn run() -> Result<(), NotedError> {
                             .default("http://localhost:11434".to_string())
                             .interact_text()?;
 
-                        let model = Input::with_theme(&ColorfulTheme::default())
+                        let model_input = Input::with_theme(&ColorfulTheme::default()) // Renamed to avoid shadowing
                             .with_prompt("Ollama model")
                             .default("gemma3:27b".to_string())
                             .interact_text()?;
 
                         let mut config = Config::load()?;
                         config.active_provider = Some("ollama".to_string());
-                        config.ollama = Some(OllamaConfig { url, model });
+                        config.ollama = Some(OllamaConfig { url, model: model_input }); // Use the renamed variable
                         config.save()?;
                         println!("{}", "Config saved successfully.".green());
                     }
@@ -457,9 +462,9 @@ async fn run() -> Result<(), NotedError> {
                             .default("http://localhost:1234".to_string())
                             .interact_text()?;
 
-                        let model = Input::with_theme(&ColorfulTheme::default())
+                        let model_input = Input::with_theme(&ColorfulTheme::default()) // Renamed to avoid shadowing
                             .with_prompt("Model")
-                            .default("gemma3:27b".to_string())
+                            .default("gpt-4o".to_string()) // Changed default model
                             .interact_text()?;
 
                         let api_key_str = Password::with_theme(&ColorfulTheme::default())
@@ -477,7 +482,7 @@ async fn run() -> Result<(), NotedError> {
                         config.active_provider = Some("openai".to_string());
                         config.openai = Some(OpenAIConfig {
                             url,
-                            model,
+                            model: model_input, // Use the renamed variable
                             api_key,
                         });
                         config.save()?;
@@ -548,8 +553,9 @@ async fn run() -> Result<(), NotedError> {
             output,
             api_key,
             prompt,
+            model, // This `model` is the one from `cli.rs`
             pages_per_batch,
-            pages, // Capture the new 'pages' argument
+            pages,
         } => {
             let config = Config::load()?;
             let client: Box<dyn AiProvider> = match config.active_provider.as_deref() {
@@ -561,7 +567,14 @@ async fn run() -> Result<(), NotedError> {
                     } else {
                         return Err(NotedError::GeminiNotConfigured);
                     };
-                    Box::new(GeminiClient::new(final_api_key, prompt))
+                    let final_model = model.unwrap_or_else(|| {
+                        if let Some(gemini_config) = &config.gemini {
+                            gemini_config.model.clone()
+                        } else {
+                            "gemini-2.5-flash".to_string()
+                        }
+                    });
+                    Box::new(GeminiClient::new(final_api_key, final_model, prompt))
                 }
                 Some("ollama") => {
                     let url = if let Some(ollama_config) = &config.ollama {
@@ -569,12 +582,14 @@ async fn run() -> Result<(), NotedError> {
                     } else {
                         return Err(NotedError::OllamaNotConfigured);
                     };
-                    let model = if let Some(ollama_config) = &config.ollama {
-                        ollama_config.model.clone()
-                    } else {
-                        return Err(NotedError::OllamaNotConfigured);
-                    };
-                    Box::new(OllamaClient::new(url, model, prompt))
+                    let final_model = model.unwrap_or_else(|| {
+                        if let Some(ollama_config) = &config.ollama {
+                            ollama_config.model.clone()
+                        } else {
+                            "gemma3:27b".to_string()
+                        }
+                    });
+                    Box::new(OllamaClient::new(url, final_model, prompt))
                 }
                 Some("claude") => {
                     let api_key = if let Some(key) = api_key {
@@ -585,13 +600,15 @@ async fn run() -> Result<(), NotedError> {
                         return Err(NotedError::ClaudeNotConfigured);
                     };
 
-                    let model = if let Some(claude_config) = &config.claude {
-                        claude_config.model.clone()
-                    } else {
-                        return Err(NotedError::ClaudeNotConfigured);
-                    };
+                    let final_model = model.unwrap_or_else(|| {
+                        if let Some(claude_config) = &config.claude {
+                            claude_config.model.clone()
+                        } else {
+                            "claude-3-opus-20240229".to_string()
+                        }
+                    });
 
-                    Box::new(ClaudeClient::new(api_key, model, prompt))
+                    Box::new(ClaudeClient::new(api_key, final_model, prompt))
                 }
                 Some("openai") => {
                     let url = if let Some(openai_config) = &config.openai {
@@ -599,17 +616,19 @@ async fn run() -> Result<(), NotedError> {
                     } else {
                         return Err(NotedError::OpenAINotConfigured);
                     };
-                    let model = if let Some(openai_config) = &config.openai {
-                        openai_config.model.clone()
-                    } else {
-                        return Err(NotedError::OpenAINotConfigured);
-                    };
+                    let final_model = model.unwrap_or_else(|| {
+                        if let Some(openai_config) = &config.openai {
+                            openai_config.model.clone()
+                        } else {
+                            "gpt-4o".to_string()
+                        }
+                    });
                     let api_key = if let Some(openai_config) = &config.openai {
                         openai_config.api_key.clone()
                     } else {
                         return Err(NotedError::OpenAINotConfigured);
                     };
-                    Box::new(OpenAIClient::new(url, model, api_key, prompt))
+                    Box::new(OpenAIClient::new(url, final_model, api_key, prompt))
                 }
                 _ => return Err(NotedError::NoActiveProvider),
             };

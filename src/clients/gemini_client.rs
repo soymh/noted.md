@@ -66,14 +66,16 @@ pub struct PartResponse {
 pub struct GeminiClient {
     client: Client,
     api_key: String,
+    model: String,
     prompt: Option<String>,
 }
 
 impl GeminiClient {
-    pub fn new(api_key: String, prompt: Option<String>) -> Self {
+    pub fn new(api_key: String, model: String, prompt: Option<String>) -> Self {
         Self {
             client: Client::new(),
             api_key,
+            model,
             prompt,
         }
     }
@@ -83,7 +85,8 @@ impl GeminiClient {
 impl AiProvider for GeminiClient {
     async fn send_request(&self, files_data: Vec<FileData>) -> Result<String, NotedError> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}", // Use gemini-pro-vision for multi-modal
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", // Use gemini-pro-vision for multi-modal
+            self.model,
             self.api_key
         );
 

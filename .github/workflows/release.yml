@@ -1,14 +1,15 @@
 name: Release
 
 on:
-  release:
-    types:
-      - published
-
+  push:
+    tags:
+      - 'v*.*.*'
 jobs:
   build-and-upload:
     name: Build (${{ matrix.build }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write 
 
     strategy:
       fail-fast: false
@@ -26,7 +27,7 @@ jobs:
             os: macos-latest
             target: aarch64-apple-darwin
 
-          - build: windows-gnu
+          - build: windows-msvc
             os: windows-latest
             target: x86_64-pc-windows-msvc
 
@@ -83,3 +84,9 @@ jobs:
         with:
           files: |
             ${{ env.ASSET }}
+          generate_release_notes: true
+          name: Release ${{ github.ref_name }}
+          body: |
+            Automated release for version ${{ github.ref_name }}.
+            See changes below.
+

@@ -199,6 +199,13 @@ async fn send_request_with_retry(
             }
             tokio::time::sleep(delay).await;
         }
+        if verbose && attempt == 0 {
+            progress_bar.println(format!(
+                "{} {}",
+                "→".cyan(),
+                "Sending request to AI model...".cyan()
+            ));
+        }
         match client.send_request(batch_data.clone()).await {
             Ok(result) => return Ok(result),
             Err(e @ NotedError::ApiError { .. }) | Err(e @ NotedError::NetworkError(_)) => {
@@ -230,7 +237,8 @@ async fn process_and_save_file(
     client: &dyn AiProvider,
     output_dir: Option<&str>,
     pages_per_batch: u32,
-    selected_pages_arg: Option<Vec<u32>>, // Renamed parameter to avoid conflict
+    selected_pages_arg: Option<Vec<u32>>,
+    priority_pages_arg: Option<Vec<u32>>,
     json_output: bool,
     max_retries: u32,
     verbose: bool,
@@ -268,7 +276,8 @@ async fn process_and_save_file(
         .with_extension("json")
         .to_string_lossy()
         .into_owned();
-    let mut json_data: HashMap<String, String> = if json_output && Path::new(&json_path).exists() {
+    let has_json_target = json_output || priority_pages_arg.is_some();
+    let mut json_data: HashMap<String, String> = if has_json_target && Path::new(&json_path).exists() {
         fs::read_to_string(&json_path)
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok())
@@ -286,7 +295,7 @@ async fn process_and_save_file(
         let (pdf, total_pages) = process_pdf(file_path)?;
         
         // Determine which pages to process based on selected_pages_arg
-        let pages_to_process = if let Some(mut pages) = selected_pages_arg {
+        let mut pages_to_process = if let Some(mut pages) = selected_pages_arg {
             // If specific pages are selected, filter out already processed ones if resuming
             let last_processed = tracker.get_progress(file_path)
                 .map(|p| p.last_processed_page)
@@ -328,6 +337,62 @@ async fn process_and_save_file(
             String::new()
         };
         
+        // Remove priority pages from normal processing so they aren't processed twice
+        if let Some(ref priority_pages) = priority_pages_arg {
+            pages_to_process.retain(|p| !priority_pages.contains(p));
+        }
+
+        // Set progress bar to track overall page count, not just file count
+        let priority_count = priority_pages_arg.as_ref().map(|p| p.len()).unwrap_or(0);
+        let total_work = priority_count + pages_to_process.len();
+        if total_work > 0 {
+            progress_bar.reset();
+            progress_bar.set_length(total_work as u64);
+        }
+
+        // --- Priority pages: process first, store only in JSON (never merge into markdown) ---
+        if let Some(ref priority_pages) = priority_pages_arg {
+            for &page_0_indexed in priority_pages {
+                let page_key = (page_0_indexed + 1).to_string();
+                if json_data.contains_key(&page_key) {
+                    if verbose {
+                        progress_bar.println(format!(
+                            "{} {}",
+                            "✓".green(),
+                            format!("Priority page {} already in JSON, skipping", page_0_indexed + 1).green()
+                        ));
+                    }
+                } else {
+                    progress_bar.set_message(format!("Priority page {}/{}", page_0_indexed + 1, priority_pages.len()));
+                    if verbose {
+                        progress_bar.println(format!(
+                            "{} {}",
+                            "⭐".yellow(),
+                            format!("Processing priority page {} of {} (total {})", page_0_indexed + 1, total_pages, priority_pages.len()).yellow()
+                        ));
+                    } else {
+                        progress_bar.println(format!(
+                            "{} {}",
+                            "⭐".yellow(),
+                            format!("Processing priority page {} of {}", page_0_indexed + 1, total_pages).yellow()
+                        ));
+                    }
+                    let file_data = extract_page_as_image(&pdf, page_0_indexed)?;
+                    let page_markdown = send_request_with_retry(
+                        client, vec![file_data], max_retries, verbose, progress_bar,
+                    )
+                    .await?;
+                    json_data.insert(page_key, page_markdown);
+                    if has_json_target {
+                        let json_string = serde_json::to_string_pretty(&json_data)
+                            .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                        fs::write(&json_path, &json_string)?;
+                    }
+                }
+                progress_bar.inc(1);
+            }
+        }
+
         let mut processed_pages_count_in_session = 0;
         let total_selected_pages_count = pages_to_process.len() as u32;
 
@@ -374,6 +439,8 @@ async fn process_and_save_file(
                     .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
                 fs::write(&json_path, &json_string)?;
             }
+
+            progress_bar.inc(pages_in_current_batch.len() as u64);
 
             // Save content after each batch
             fs::write(&output_path, &markdown_content)?;
@@ -716,6 +783,7 @@ async fn run() -> Result<(), NotedError> {
             verbose,
             retry,
             extract,
+            priority_pages,
         } => {
             let config = Config::load()?;
             let client: Box<dyn AiProvider> = match config.active_provider.as_deref() {
@@ -862,6 +930,7 @@ async fn run() -> Result<(), NotedError> {
                             output.as_deref(),
                             effective_ppb,
                             None, // No specific pages for batch directory processing
+                            None, // Priority pages not supported for directory
                             json,
                             retry,
                             verbose,
@@ -884,17 +953,21 @@ async fn run() -> Result<(), NotedError> {
                 file_utils::get_file_mime_type(path_str)?;
 
                 // For single file, check if it's a PDF and if pages argument is provided
-                let selected_pages = if path_str.ends_with(".pdf") {
-                    if let Some(page_selection_str) = pages {
-                        // We need total pages to validate selection first
-                        let (pdf_dummy, total_pages) = process_pdf(path_str)?;
-                        drop(pdf_dummy); // Drop PDF as we only need total_pages here
-                        Some(parse_page_ranges(&page_selection_str, total_pages)?)
+                let (selected_pages, parsed_priority_pages) = if path_str.ends_with(".pdf") {
+                    let (_, total_pages) = process_pdf(path_str)?;
+                    let sel = if let Some(ref s) = pages {
+                        Some(parse_page_ranges(s, total_pages)?)
                     } else {
                         None
-                    }
+                    };
+                    let pri = if let Some(ref s) = priority_pages {
+                        Some(parse_page_ranges(s, total_pages)?)
+                    } else {
+                        None
+                    };
+                    (sel, pri)
                 } else {
-                    None // Pages argument is only for PDF files
+                    (None, None)
                 };
 
                 let progress_bar = ProgressBar::new(1); // Set to 1 as it's a single file (or handled internally for PDF pages)
@@ -911,6 +984,7 @@ async fn run() -> Result<(), NotedError> {
                     output.as_deref(),
                     effective_ppb,
                     selected_pages, // Pass the parsed selected pages
+                    parsed_priority_pages,
                     json,
                     retry,
                     verbose,

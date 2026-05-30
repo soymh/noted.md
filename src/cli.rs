@@ -61,6 +61,10 @@ pub enum Commands {
         /// Extract specific pages into a named file (e.g., "1,22,54,86-table.md")
         #[arg(long, help = "Extract specific pages into a named file (e.g., \"1,22,54,86-table.md\")")]
         extract: Option<String>,
+
+        /// Priority pages to process first, stored only in JSON (e.g., "1,22,54,86"). On next run, their content merges into the markdown.
+        #[arg(long, help = "Priority pages to process first into JSON only. On next run, their content merges into the markdown.")]
+        priority_pages: Option<String>,
     },
 
     /// Configure notedmd settings

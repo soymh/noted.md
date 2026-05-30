@@ -383,7 +383,16 @@ async fn process_and_save_file(
                     .await?;
                     json_data.insert(page_key, page_markdown);
                     if has_json_target {
-                        let json_string = serde_json::to_string_pretty(&json_data)
+                        let mut merged = if Path::new(&json_path).exists() {
+                            fs::read_to_string(&json_path)
+                                .ok()
+                                .and_then(|c| serde_json::from_str(&c).ok())
+                                .unwrap_or_default()
+                        } else {
+                            HashMap::new()
+                        };
+                        merged.extend(json_data.clone());
+                        let json_string = serde_json::to_string_pretty(&merged)
                             .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
                         fs::write(&json_path, &json_string)?;
                     }
@@ -434,7 +443,16 @@ async fn process_and_save_file(
                 for &page_num in &pages_in_current_batch {
                     json_data.insert((page_num + 1).to_string(), page_markdown.clone());
                 }
-                let json_string = serde_json::to_string_pretty(&json_data)
+                let mut merged = if Path::new(&json_path).exists() {
+                    fs::read_to_string(&json_path)
+                        .ok()
+                        .and_then(|c| serde_json::from_str(&c).ok())
+                        .unwrap_or_default()
+                } else {
+                    HashMap::new()
+                };
+                merged.extend(json_data.clone());
+                let json_string = serde_json::to_string_pretty(&merged)
                     .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
                 fs::write(&json_path, &json_string)?;
             }

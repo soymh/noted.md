@@ -342,39 +342,38 @@ async fn process_and_save_file(
             pages_to_process.retain(|p| !priority_pages.contains(p));
         }
 
-        // Set progress bar to track overall page count, not just file count
+        // Set progress bar to track priority pages only (if priority pages active)
         let priority_count = priority_pages_arg.as_ref().map(|p| p.len()).unwrap_or(0);
-        let total_work = priority_count + pages_to_process.len();
-        if total_work > 0 {
+        if priority_count > 0 {
             progress_bar.reset();
-            progress_bar.set_length(total_work as u64);
+            progress_bar.set_length(priority_count as u64);
         }
 
         // --- Priority pages: process first, store only in JSON (never merge into markdown) ---
         if let Some(ref priority_pages) = priority_pages_arg {
-            for &page_0_indexed in priority_pages {
+            for (idx, &page_0_indexed) in priority_pages.iter().enumerate() {
                 let page_key = (page_0_indexed + 1).to_string();
                 if json_data.contains_key(&page_key) {
                     if verbose {
                         progress_bar.println(format!(
                             "{} {}",
                             "✓".green(),
-                            format!("Priority page {} already in JSON, skipping", page_0_indexed + 1).green()
+                            format!("Priority page {} (pg{}) already in JSON, skipping", idx + 1, page_0_indexed + 1).green()
                         ));
                     }
                 } else {
-                    progress_bar.set_message(format!("Priority page {}/{}", page_0_indexed + 1, priority_pages.len()));
+                    progress_bar.set_message(format!("Priority {}/{}", idx + 1, priority_pages.len()));
                     if verbose {
                         progress_bar.println(format!(
                             "{} {}",
                             "⭐".yellow(),
-                            format!("Processing priority page {} of {} (total {})", page_0_indexed + 1, total_pages, priority_pages.len()).yellow()
+                            format!("Priority {}/{} — pg{} of {}", idx + 1, priority_pages.len(), page_0_indexed + 1, total_pages).yellow()
                         ));
                     } else {
                         progress_bar.println(format!(
                             "{} {}",
                             "⭐".yellow(),
-                            format!("Processing priority page {} of {}", page_0_indexed + 1, total_pages).yellow()
+                            format!("Priority {}/{}", idx + 1, priority_pages.len()).yellow()
                         ));
                     }
                     let file_data = extract_page_as_image(&pdf, page_0_indexed)?;
@@ -439,8 +438,6 @@ async fn process_and_save_file(
                     .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
                 fs::write(&json_path, &json_string)?;
             }
-
-            progress_bar.inc(pages_in_current_batch.len() as u64);
 
             // Save content after each batch
             fs::write(&output_path, &markdown_content)?;

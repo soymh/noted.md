@@ -24,6 +24,8 @@
 
 `noted.md` is a CLI tool that uses LLMs to convert your handwritten text into markdown files. It's an interactive program that accepts pdfs, jpg, jpeg, png as an input and processes them accordingly. It can recognize mathematical equations too and can correctly format them in LaTeX. `noted.md` now supports processing **specific pages of a PDF** (e.g., "1,3-5,8"), efficiently handles **batches of pages in a single AI request**, and intelligently resumes interrupted conversions! And if you have a bunch of files to convert them at once, `noted.md` supports batch processing for directories too!
 
+Additional features include **per-page JSON output**, **extracting specific pages into a named file**, **automatic retry on API failures**, and **verbose debugging** for troubleshooting.
+
 
 https://github.com/user-attachments/assets/5e2f4ab5-2043-4ea4-b95d-bf63e36ce9d9
 
@@ -138,6 +140,10 @@ Once configured, you can convert your handwritten notes.
 | `--api-key <key>`                | Temporarily override the stored API key for a single `convert` command.     |
 | `--pages <ranges>`               | **For PDFs:** Specify specific pages or page ranges to convert (e.g., "1,3-5,8"). Can resume from last progress. |
 | `--pages-per-batch <num>`        | Number of pages to process at once (max 30). Default: 1.                    |
+| `--json`                         | Output a JSON file alongside the Markdown with per-page OCR results.        |
+| `--extract <pages-file>`         | **For PDFs:** Extract specific pages into a named file (e.g., "1,22,54,86-table.md"). |
+| `--retry <num>`                  | Number of times to retry on API failure. Default: 3.                        |
+| `-v`, `--verbose`                | Enable verbose output for debugging (shows full API request/response).      |
 
 **Examples:**
 
@@ -160,6 +166,21 @@ Once configured, you can convert your handwritten notes.
 -   **Convert a file and save it to a different directory**:
     ```bash
     notedmd convert my_document.pdf --output ./markdown_notes/
+    ```
+
+-   **Generate per-page JSON alongside the markdown**:
+    ```bash
+    notedmd convert my_textbook.pdf --json
+    ```
+
+-   **Extract specific pages into a named file**:
+    ```bash
+    notedmd convert my_textbook.pdf --extract "1,22,54,86-table.md"
+    ```
+
+-   **Increase retries and enable verbose debugging**:
+    ```bash
+    notedmd convert my_document.pdf --retry 5 -v
     ```
 
 -   **Convert all supported files in a directory**:

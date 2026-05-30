@@ -45,6 +45,22 @@ pub enum Commands {
         /// Specific pages or page ranges to convert (e.g., "1,3-5,8")
         #[arg(long, help = "Specific pages or page ranges to convert (e.g., \"1,3-5,8\")")]
         pages: Option<String>,
+
+        /// Output JSON file with per-page OCR results
+        #[arg(long, help = "Output JSON file alongside Markdown with per-page OCR results")]
+        json: bool,
+
+        /// Enable verbose output for debugging (shows full API error details)
+        #[arg(short, long, help = "Enable verbose output for debugging")]
+        verbose: bool,
+
+        /// Number of times to retry on API failure (default: 3)
+        #[arg(long, default_value = "3", help = "Number of times to retry on API failure")]
+        retry: u32,
+
+        /// Extract specific pages into a named file (e.g., "1,22,54,86-table.md")
+        #[arg(long, help = "Extract specific pages into a named file (e.g., \"1,22,54,86-table.md\")")]
+        extract: Option<String>,
     },
 
     /// Configure notedmd settings

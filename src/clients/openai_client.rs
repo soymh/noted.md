@@ -121,6 +121,7 @@ impl AiProvider for OpenAIClient {
                 content: content_parts,
                     }],
         };
+        let request_json = serde_json::to_string_pretty(&request_body).unwrap_or_default();
         let mut request = self.client.post(&url);
 
         if let Some(api_key) = &self.api_key {
@@ -136,20 +137,32 @@ impl AiProvider for OpenAIClient {
             let error_response: Result<OpenAIResponse, _> = serde_json::from_str(&response_body);
             if let Ok(err_resp) = error_response {
                 if let Some(error) = err_resp.error {
-                    return Err(NotedError::ApiError(error.message));
+                    return Err(NotedError::ApiError {
+                        message: error.message,
+                        url: url.clone(),
+                        request_body: Some(request_json.clone()),
+                        response_body: Some(response_body.clone()),
+                    });
                 }
             }
-            return Err(NotedError::ApiError(format!(
-                "Received status code: {}",
-                status
-            )));
+            return Err(NotedError::ApiError {
+                message: format!("Received status code: {}", status),
+                url,
+                request_body: Some(request_json),
+                response_body: Some(response_body),
+            });
         }
 
         let openai_response: OpenAIResponse = serde_json::from_str(&response_body)
             .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;
 
         if let Some(error) = openai_response.error {
-            return Err(NotedError::ApiError(error.message));
+            return Err(NotedError::ApiError {
+                message: error.message,
+                url,
+                request_body: Some(request_json),
+                response_body: Some(response_body),
+            });
         }
 
         let markdown_text = openai_response

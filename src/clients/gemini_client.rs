@@ -120,6 +120,7 @@ impl AiProvider for GeminiClient {
                 parts, // Use the collected parts
             }],
         };
+        let request_json = serde_json::to_string_pretty(&request_body).unwrap_or_default();
         let response = self.client.post(&url).json(&request_body).send().await?;
 
         let status = response.status();
@@ -133,20 +134,32 @@ impl AiProvider for GeminiClient {
             let error_response: Result<GeminiResponse, _> = serde_json::from_str(&response_body);
             if let Ok(err_resp) = error_response {
                 if let Some(error) = err_resp.error {
-                    return Err(NotedError::ApiError(error.message));
+                    return Err(NotedError::ApiError {
+                        message: error.message,
+                        url: url.clone(),
+                        request_body: Some(request_json.clone()),
+                        response_body: Some(response_body.clone()),
+                    });
                 }
             }
-            return Err(NotedError::ApiError(format!(
-                "Received status code: {}",
-                status
-            )));
+            return Err(NotedError::ApiError {
+                message: format!("Received status code: {}", status),
+                url,
+                request_body: Some(request_json),
+                response_body: Some(response_body),
+            });
         }
 
         let gemini_response: GeminiResponse = serde_json::from_str(&response_body)
             .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;
 
         if let Some(error) = gemini_response.error {
-            return Err(NotedError::ApiError(error.message));
+            return Err(NotedError::ApiError {
+                message: error.message,
+                url,
+                request_body: Some(request_json),
+                response_body: Some(response_body),
+            });
         }
 
         let markdown_text = gemini_response

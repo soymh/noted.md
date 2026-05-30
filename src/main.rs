@@ -16,6 +16,7 @@ use dialoguer::Input;
 use dialoguer::Select;
 use dialoguer::{Password, theme::ColorfulTheme};
 use error::NotedError;
+use file_utils::FileData;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 
@@ -24,7 +25,7 @@ use crate::clients::gemini_client::GeminiClient;
 use crate::clients::ollama_client::OllamaClient;
 use crate::clients::openai_client::OpenAIClient;
 use crate::config::OpenAIConfig;
-use std::{fs, path::Path, collections::BTreeSet};
+use std::{collections::{BTreeSet, HashMap}, fs, path::Path};
 use ui::{ascii_art, print_clean_config};
 
 use crate::config::get_config_path;
@@ -114,12 +115,125 @@ fn parse_page_ranges(
     Ok(pages.into_iter().collect()) // Convert BTreeSet to Vec
 }
 
+fn parse_extract_arg(arg: &str, total_pages: u32) -> Result<(Vec<u32>, String), NotedError> {
+    let dash_pos = arg.rfind('-').ok_or_else(|| {
+        NotedError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Extract argument must be in the format PAGES-FILENAME.md (e.g., \"1,22,54,86-table.md\")"
+                .to_string(),
+        ))
+    })?;
+    let page_spec = &arg[..dash_pos];
+    let filename = &arg[dash_pos + 1..];
+
+    if !filename.ends_with(".md") {
+        return Err(NotedError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Extract filename must end with .md".to_string(),
+        )));
+    }
+
+    let pages = parse_page_ranges(page_spec, total_pages)?;
+    Ok((pages, filename.to_string()))
+}
+
+fn format_noted_error(err: &NotedError, verbose: bool) -> String {
+    if !verbose {
+        return err.to_string().red().to_string();
+    }
+    match err {
+        NotedError::ApiError { message, url, request_body, response_body } => {
+            let mut s = format!("{}\n", "═══ API Error ═══════════════════════════════".red());
+            s.push_str(&format!("  URL: {}\n", url.yellow()));
+            s.push_str(&format!("  Message: {}\n\n", message.red()));
+            if let Some(req) = request_body {
+                s.push_str(&format!("{} Request:\n", "▶".cyan()));
+                let truncated = if req.len() > 2000 {
+                    format!("{}\n  (...truncated, {} total bytes)", &req[..2000], req.len())
+                } else {
+                    req.clone()
+                };
+                for line in truncated.lines() {
+                    s.push_str(&format!("  {}\n", line));
+                }
+                s.push('\n');
+            }
+            if let Some(resp) = response_body {
+                s.push_str(&format!("{} Response:\n", "◀".cyan()));
+                let truncated = if resp.len() > 2000 {
+                    format!("{}\n  (...truncated, {} total bytes)", &resp[..2000], resp.len())
+                } else {
+                    resp.clone()
+                };
+                for line in truncated.lines() {
+                    s.push_str(&format!("  {}\n", line));
+                }
+            }
+            s
+        }
+        _ => {
+            format!("{} {:#?}", "✖".red(), err)
+        }
+    }
+}
+
+async fn send_request_with_retry(
+    client: &dyn AiProvider,
+    batch_data: Vec<FileData>,
+    max_retries: u32,
+    verbose: bool,
+    progress_bar: &ProgressBar,
+) -> Result<String, NotedError> {
+    let mut last_error = None;
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(1u64 << (attempt - 1));
+            if verbose {
+                progress_bar.println(format!(
+                    "{} Retry {}/{} in {}s...",
+                    "↻".yellow(),
+                    attempt,
+                    max_retries,
+                    delay.as_secs()
+                ));
+            }
+            tokio::time::sleep(delay).await;
+        }
+        match client.send_request(batch_data.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(e @ NotedError::ApiError { .. }) | Err(e @ NotedError::NetworkError(_)) => {
+                if attempt == max_retries {
+                    return Err(e);
+                }
+                if verbose {
+                    progress_bar.println(format!(
+                        "{} {}",
+                        "✖".red(),
+                        format!("API call failed: {}. Retrying...", e).red()
+                    ));
+                }
+                last_error = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_error.unwrap_or(NotedError::ApiError {
+        message: "Unknown error after retries".into(),
+        url: String::new(),
+        request_body: None,
+        response_body: None,
+    }))
+}
+
 async fn process_and_save_file(
     file_path: &str,
     client: &dyn AiProvider,
     output_dir: Option<&str>,
     pages_per_batch: u32,
     selected_pages_arg: Option<Vec<u32>>, // Renamed parameter to avoid conflict
+    json_output: bool,
+    max_retries: u32,
+    verbose: bool,
     progress_bar: &ProgressBar,
 ) -> Result<(), NotedError> {
     let path = Path::new(file_path);
@@ -150,8 +264,22 @@ async fn process_and_save_file(
         None => path.with_extension("md").to_string_lossy().into_owned(),
     };
 
+    let json_path = Path::new(&output_path)
+        .with_extension("json")
+        .to_string_lossy()
+        .into_owned();
+    let mut json_data: HashMap<String, String> = if json_output && Path::new(&json_path).exists() {
+        fs::read_to_string(&json_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let progress_path = format!("{}.progress", output_path);
+
     // Load progress tracker
-    let mut tracker = ProgressTracker::load()?;
+    let mut tracker = ProgressTracker::load(Path::new(&progress_path))?;
     
     if path.extension().and_then(|ext| ext.to_str()) == Some("pdf") {
         // Process PDF file page by page
@@ -169,7 +297,7 @@ async fn process_and_save_file(
             if pages.is_empty() && tracker.get_progress(file_path).is_some() {
                  progress_bar.println(format!("{} {}", "ℹ️".cyan(), "All specified pages already processed. Skipping.".cyan()));
                  tracker.mark_completed(file_path); // Mark as completed if all selected pages are done
-                 tracker.save()?;
+                 tracker.save(Path::new(&progress_path))?;
                  return Ok(());
             }
             pages.sort_unstable(); // Ensure pages are sorted for sequential processing
@@ -187,7 +315,7 @@ async fn process_and_save_file(
             // If no pages to process, and it's not a full document completion, we should still ensure progress is saved if it was previously started.
             if tracker.get_progress(file_path).is_some() {
                 tracker.mark_completed(file_path);
-                tracker.save()?;
+                tracker.save(Path::new(&progress_path))?;
             }
             return Ok(());
         }
@@ -230,13 +358,22 @@ async fn process_and_save_file(
 
             progress_bar.set_message(format!("{}", "Sending batch to your AI model...".yellow()));
 
-            let page_markdown = client.send_request(batch_data).await?;
+            let page_markdown = send_request_with_retry(client, batch_data, max_retries, verbose, progress_bar).await?;
             
             // Add page separator if there's existing content AND new content to add
             if !markdown_content.is_empty() && !page_markdown.is_empty() {
                 markdown_content.push_str("\n\n---\n\n");
             }
             markdown_content.push_str(&page_markdown);
+
+            if json_output {
+                for &page_num in &pages_in_current_batch {
+                    json_data.insert((page_num + 1).to_string(), page_markdown.clone());
+                }
+                let json_string = serde_json::to_string_pretty(&json_data)
+                    .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                fs::write(&json_path, &json_string)?;
+            }
 
             // Save content after each batch
             fs::write(&output_path, &markdown_content)?;
@@ -256,7 +393,7 @@ async fn process_and_save_file(
                     },
                 );
             }
-            tracker.save()?;
+            tracker.save(Path::new(&progress_path))?;
 
             processed_pages_count_in_session += pages_in_current_batch.len() as u32;
         }
@@ -268,7 +405,7 @@ async fn process_and_save_file(
         // or if it was a full document conversion and it's truly finished.
         if processed_pages_count_in_session == total_selected_pages_count {
             tracker.mark_completed(file_path);
-            tracker.save()?;
+            tracker.save(Path::new(&progress_path))?;
         }
 
         progress_bar.println(format!(
@@ -287,10 +424,14 @@ async fn process_and_save_file(
 
         progress_bar.set_message(format!("{}", "Sending to your AI model...".yellow()));
 
-        let markdown = client.send_request(vec![file_data]).await?;
+        let markdown = send_request_with_retry(client, vec![file_data], max_retries, verbose, progress_bar).await?;
         progress_bar.println(format!("{} {}", "✔".green(), "Received response.".green()));
 
-        match std::fs::write(&output_path, markdown) {
+        if json_output {
+            json_data.insert("1".to_string(), markdown.clone());
+        }
+
+        match std::fs::write(&output_path, &markdown) {
             Ok(_) => {
                 progress_bar.println(format!(
                     "{} {}",
@@ -309,6 +450,21 @@ async fn process_and_save_file(
         }
     }
     
+    if json_output && !json_data.is_empty() {
+        let json_path = Path::new(&output_path)
+            .with_extension("json")
+            .to_string_lossy()
+            .into_owned();
+        let json_string = serde_json::to_string_pretty(&json_data)
+            .map_err(|e| NotedError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        fs::write(&json_path, &json_string)?;
+        progress_bar.println(format!(
+            "{} {}",
+            "✔".green(),
+            format!("JSON saved to '{}'", json_path.cyan()).green()
+        ));
+    }
+
     Ok(())
 }
 
@@ -556,6 +712,10 @@ async fn run() -> Result<(), NotedError> {
             model, // This `model` is the one from `cli.rs`
             pages_per_batch,
             pages,
+            json,
+            verbose,
+            retry,
+            extract,
         } => {
             let config = Config::load()?;
             let client: Box<dyn AiProvider> = match config.active_provider.as_deref() {
@@ -648,6 +808,19 @@ async fn run() -> Result<(), NotedError> {
                 )));
             }
 
+            if json && pages_per_batch > 1 {
+                eprintln!(
+                    "⚠ {}",
+                    format!(
+                        "Warning: pages-per-batch={} is not supported with --json. \
+                         Using 1 page per batch for per-page JSON output.",
+                        pages_per_batch
+                    )
+                    .yellow()
+                );
+            }
+            let effective_ppb: u32 = if json { 1 } else { pages_per_batch };
+
             if input_path.is_dir() {
                 let files_to_convert: Vec<_> = std::fs::read_dir(input_path)?
                     .filter_map(Result::ok)
@@ -687,13 +860,16 @@ async fn run() -> Result<(), NotedError> {
                             file_path_str,
                             client.as_ref(),
                             output.as_deref(),
-                            pages_per_batch,
+                            effective_ppb,
                             None, // No specific pages for batch directory processing
+                            json,
+                            retry,
+                            verbose,
                             &progress_bar,
                         )
                         .await
                         {
-                            progress_bar.println(format!("{}", e.to_string().red()));
+                            progress_bar.println(format_noted_error(&e, verbose));
                         }
                     }
                     progress_bar.inc(1);
@@ -733,14 +909,93 @@ async fn run() -> Result<(), NotedError> {
                     path_str,
                     client.as_ref(),
                     output.as_deref(),
-                    pages_per_batch,
+                    effective_ppb,
                     selected_pages, // Pass the parsed selected pages
+                    json,
+                    retry,
+                    verbose,
                     &progress_bar,
                 )
                 .await
                 {
-                    progress_bar.println(format!("{}", e.to_string().red()));
+                    progress_bar.println(format_noted_error(&e, verbose));
                 }
+
+                // Extraction pass: re-process selected pages into a named file
+                if let Some(ref extract_arg) = extract {
+                    if path_str.ends_with(".pdf") {
+                        let extract_progress_bar = ProgressBar::new(1);
+                        extract_progress_bar.set_style(
+                            ProgressStyle::default_bar()
+                                .template("{bar:40.cyan/blue} {pos}/{len} {msg}")
+                                .unwrap(),
+                        );
+                        extract_progress_bar.set_message("Extracting pages...");
+
+                        let (pdf, total_pages) = process_pdf(path_str)?;
+                        let (extract_pages, extract_filename) =
+                            parse_extract_arg(extract_arg, total_pages)?;
+
+                        let extract_output_path = match output.as_deref() {
+                            Some(dir) => {
+                                let dir_path = Path::new(dir);
+                                if !dir_path.exists() {
+                                    std::fs::create_dir_all(dir_path)?;
+                                }
+                                dir_path
+                                    .join(&extract_filename)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            }
+                            None => {
+                                let parent = Path::new(path_str).parent().unwrap_or(Path::new("."));
+                                parent
+                                    .join(&extract_filename)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            }
+                        };
+
+                        let mut extract_content = String::new();
+                        for (i, &page_0_indexed) in extract_pages.iter().enumerate() {
+                            extract_progress_bar.println(format!(
+                                "{} {}",
+                                "📄".blue(),
+                                format!("Extracting page {} of {}", page_0_indexed + 1, total_pages)
+                                    .blue()
+                            ));
+                            let file_data = extract_page_as_image(&pdf, page_0_indexed)?;
+                            let page_markdown = send_request_with_retry(
+                                client.as_ref(),
+                                vec![file_data],
+                                retry,
+                                verbose,
+                                &extract_progress_bar,
+                            )
+                            .await?;
+                            if i > 0 && !page_markdown.is_empty() {
+                                extract_content.push_str("\n\n---\n\n");
+                            }
+                            extract_content.push_str(&page_markdown);
+                        }
+
+                        fs::write(&extract_output_path, &extract_content)?;
+                        extract_progress_bar.println(format!(
+                            "{} {}",
+                            "✔".green(),
+                            format!("Extracted pages saved to '{}'", extract_output_path.cyan())
+                                .green()
+                        ));
+                        extract_progress_bar.finish_and_clear();
+                    } else {
+                        progress_bar.println(format!(
+                            "{} {}",
+                            "⚠".yellow(),
+                            "Extract is only supported for PDF files.".yellow()
+                        ));
+                    }
+                }
+
                 progress_bar.inc(1);
                 progress_bar
                     .finish_with_message(format!("{}", "Completed processing file".green()));

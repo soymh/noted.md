@@ -21,8 +21,13 @@ pub enum NotedError {
     #[error(" API key is invalid or missing. Please check your configuration.")]
     InvalidApiKey,
 
-    #[error(" The AI provider returned an error: {0}")]
-    ApiError(String),
+    #[error(" The AI provider returned an error: {message}")]
+    ApiError {
+        message: String,
+        url: String,
+        request_body: Option<String>,
+        response_body: Option<String>,
+    },
 
     #[error(" Failed to decode API response: {0}")]
     ResponseDecodeError(String),

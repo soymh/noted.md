@@ -58,6 +58,7 @@ impl AiProvider for OllamaClient {
             images,
             stream: false,
         };
+        let request_json = serde_json::to_string_pretty(&request_body).unwrap_or_default();
 
         let response = self.client.post(&url).json(&request_body).send().await?;
 
@@ -68,20 +69,32 @@ impl AiProvider for OllamaClient {
             let error_response: Result<OllamaResponse, _> = serde_json::from_str(&response_body);
             if let Ok(err_resp) = error_response {
                 if let Some(error) = err_resp.error {
-                    return Err(NotedError::ApiError(error));
+                    return Err(NotedError::ApiError {
+                        message: error,
+                        url: url.clone(),
+                        request_body: Some(request_json.clone()),
+                        response_body: Some(response_body.clone()),
+                    });
                 }
             }
-            return Err(NotedError::ApiError(format!(
-                "Received status code: {}",
-                status
-            )));
+            return Err(NotedError::ApiError {
+                message: format!("Received status code: {}", status),
+                url,
+                request_body: Some(request_json),
+                response_body: Some(response_body),
+            });
         }
 
         let ollama_response: OllamaResponse = serde_json::from_str(&response_body)
             .map_err(|e| NotedError::ResponseDecodeError(e.to_string()))?;
 
         if let Some(error) = ollama_response.error {
-            return Err(NotedError::ApiError(error));
+            return Err(NotedError::ApiError {
+                message: error,
+                url,
+                request_body: Some(request_json),
+                response_body: Some(response_body),
+            });
         }
 
         let cleaned_markdown = ollama_response

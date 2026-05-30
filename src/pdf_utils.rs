@@ -5,7 +5,7 @@ use pdf2image::{PDF2ImageError, PDF, RenderOptionsBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use tempfile::NamedTempFile;
 use image::ImageFormat;
 use base64;
@@ -28,29 +28,22 @@ impl ProgressTracker {
         }
     }
 
-    pub fn load() -> Result<Self, NotedError> {
-        let progress_file = Self::get_progress_file_path()?;
-        if progress_file.exists() {
-            let content = fs::read_to_string(&progress_file)?;
+    pub fn load(path: &Path) -> Result<Self, NotedError> {
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
             serde_json::from_str(&content).map_err(NotedError::JsonError)
         } else {
             Ok(Self::new())
         }
     }
 
-    pub fn save(&self) -> Result<(), NotedError> {
-        let progress_file = Self::get_progress_file_path()?;
+    pub fn save(&self, path: &Path) -> Result<(), NotedError> {
         let content = serde_json::to_string_pretty(self).map_err(NotedError::JsonError)?;
-        fs::write(&progress_file, content)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)?;
         Ok(())
-    }
-
-    fn get_progress_file_path() -> Result<PathBuf, NotedError> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| NotedError::ConfigDirError("Could not find config directory".into()))?;
-        let progress_dir = config_dir.join("notedmd");
-        fs::create_dir_all(&progress_dir)?;
-        Ok(progress_dir.join("progress.json"))
     }
 
     pub fn get_progress(&self, file_path: &str) -> Option<&ProcessingProgress> {
